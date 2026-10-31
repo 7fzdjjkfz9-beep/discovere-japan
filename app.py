@@ -1,0 +1,114 @@
+import os, sqlite3, secrets, time, re
+from pathlib import Path
+from contextlib import contextmanager
+from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+ROOT=Path(__file__).parent
+DB=Path(os.getenv('DATABASE_PATH', str(ROOT/'community.sqlite3')))
+DB.parent.mkdir(parents=True, exist_ok=True)
+app=FastAPI(title='Discover Japan')
+from fastapi.responses import FileResponse
+
+@app.get('/static/style.css', include_in_schema=False)
+async def stylesheet():
+ return FileResponse(ROOT/'style.css')
+templates=Jinja2Templates(directory=str(ROOT))
+
+@contextmanager
+def conn():
+ c=sqlite3.connect(DB,timeout=20)
+ c.row_factory=sqlite3.Row
+ c.execute('PRAGMA journal_mode=WAL')
+ c.execute('PRAGMA foreign_keys=ON')
+ try: yield c; c.commit()
+ finally: c.close()
+
+with conn() as c:
+ c.executescript('''CREATE TABLE IF NOT EXISTS posts(id INTEGER PRIMARY KEY AUTOINCREMENT, author TEXT NOT NULL, prefecture TEXT NOT NULL, category TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, owner TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, reports INTEGER NOT NULL DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS comments(id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL REFERENCES posts(id), author TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, owner TEXT NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, reports INTEGER NOT NULL DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS likes(post_id INTEGER NOT NULL REFERENCES posts(id), owner TEXT NOT NULL, PRIMARY KEY(post_id,owner));
+ CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, action TEXT NOT NULL, created_at INTEGER NOT NULL);
+ CREATE INDEX IF NOT EXISTS events_idx ON events(owner,action,created_at);''')
+
+PREFS=['指定なし','北海道','青森県','岩手県','宮城県','秋田県','山形県','福島県','茨城県','栃木県','群馬県','埼玉県','千葉県','東京都','神奈川県','新潟県','富山県','石川県','福井県','山梨県','長野県','岐阜県','静岡県','愛知県','三重県','滋賀県','京都府','大阪府','兵庫県','奈良県','和歌山県','鳥取県','島根県','岡山県','広島県','山口県','徳島県','香川県','愛媛県','高知県','福岡県','佐賀県','長崎県','熊本県','大分県','宮崎県','鹿児島県','沖縄県']
+CATS=['体験談','おすすめ','質問','グルメ','日常']
+
+def identity(request):
+ token=request.cookies.get('dj_guest','')
+ if not re.fullmatch(r'[a-f0-9]{64}',token): return secrets.token_hex(32),True
+ return token,False
+
+def response_cookie(resp,owner,fresh):
+ if fresh: resp.set_cookie('dj_guest',owner,max_age=365*86400,httponly=True,secure=os.getenv('COOKIE_SECURE','1')!='0',samesite='lax')
+ return resp
+
+def validate(name,body,min_body=3):
+ name=name.strip();body=body.strip()
+ if not 2<=len(name)<=35 or not min_body<=len(body)<=2000: raise HTTPException(400,'名前または本文の長さを確認してください')
+ if re.search(r'https?://|www\.|<[^>]*>',name+' '+body,re.I): raise HTTPException(400,'URLやHTMLは投稿できません')
+ return name,body
+
+def rate(c,owner,action,limit):
+ now=int(time.time())
+ count=c.execute('SELECT COUNT(*) FROM events WHERE owner=? AND action=? AND created_at>?',(owner,action,now-3600)).fetchone()[0]
+ if count>=limit: raise HTTPException(429,'投稿回数の上限です。時間をおいて再試行してください')
+ c.execute('INSERT INTO events(owner,action,created_at) VALUES(?,?,?)',(owner,action,now))
+
+@app.get('/',response_class=HTMLResponse)
+async def home(request:Request,tab:str='home',prefecture:str='',category:str=''):
+ if tab not in ('home','community','shiga','about','food'): tab='home'
+ with conn() as c:
+  sql='SELECT p.*, (SELECT COUNT(*) FROM likes l WHERE l.post_id=p.id) AS likes_count,(SELECT COUNT(*) FROM comments x WHERE x.post_id=p.id AND x.hidden=0) AS comments_count FROM posts p WHERE hidden=0'
+  args=[]
+  if prefecture in PREFS and prefecture!='指定なし':sql+=' AND prefecture=?';args.append(prefecture)
+  if category in CATS:sql+=' AND category=?';args.append(category)
+  sql+=' ORDER BY p.id DESC LIMIT 100'
+  posts=[dict(row) for row in c.execute(sql,args).fetchall()]
+  comments={p['id']:[dict(x) for x in c.execute('SELECT * FROM comments WHERE post_id=? AND hidden=0 ORDER BY id LIMIT 100',(p['id'],))] for p in posts}
+ return templates.TemplateResponse(request,'index.html',{'tab':tab,'posts':posts,'comments':comments,'prefs':PREFS,'cats':CATS,'selected_pref':prefecture,'selected_cat':category,'error':request.query_params.get('error','')})
+
+@app.post('/post')
+async def create_post(request:Request,author:str=Form(...),body:str=Form(...),prefecture:str=Form('指定なし'),category:str=Form('体験談'),website:str=Form('')):
+ if website: return RedirectResponse('/?tab=community',303)
+ author,body=validate(author,body,5)
+ if prefecture not in PREFS or category not in CATS:raise HTTPException(400,'Invalid category or location')
+ owner,fresh=identity(request)
+ with conn() as c:
+  rate(c,owner,'post',5)
+  c.execute('INSERT INTO posts(author,prefecture,category,body,created_at,owner) VALUES(?,?,?,?,?,?)',(author,prefecture,category,body,int(time.time()),owner))
+ return response_cookie(RedirectResponse('/?tab=community#feed',303),owner,fresh)
+
+@app.post('/comment/{post_id}')
+async def create_comment(post_id:int,request:Request,author:str=Form(...),body:str=Form(...),website:str=Form('')):
+ if website:return RedirectResponse('/?tab=community',303)
+ author,body=validate(author,body,2)
+ owner,fresh=identity(request)
+ with conn() as c:
+  if not c.execute('SELECT id FROM posts WHERE id=? AND hidden=0',(post_id,)).fetchone():raise HTTPException(404)
+  rate(c,owner,'comment',15)
+  c.execute('INSERT INTO comments(post_id,author,body,created_at,owner) VALUES(?,?,?,?,?)',(post_id,author,body,int(time.time()),owner))
+ return response_cookie(RedirectResponse('/?tab=community#post-'+str(post_id),303),owner,fresh)
+
+@app.post('/like/{post_id}')
+async def like(post_id:int,request:Request):
+ owner,fresh=identity(request)
+ with conn() as c:
+  if not c.execute('SELECT id FROM posts WHERE id=? AND hidden=0',(post_id,)).fetchone():raise HTTPException(404)
+  rate(c,owner,'like',100)
+  c.execute('INSERT OR IGNORE INTO likes(post_id,owner) VALUES(?,?)',(post_id,owner))
+ return response_cookie(RedirectResponse('/?tab=community#post-'+str(post_id),303),owner,fresh)
+
+@app.post('/report/{post_id}')
+async def report(post_id:int,request:Request,comment_id:int=Form(0)):
+ owner,fresh=identity(request)
+ with conn() as c:
+  rate(c,owner,'report',10)
+  if comment_id:c.execute('UPDATE comments SET reports=reports+1,hidden=CASE WHEN reports>=2 THEN 1 ELSE hidden END WHERE id=? AND post_id=?',(comment_id,post_id))
+  else:c.execute('UPDATE posts SET reports=reports+1,hidden=CASE WHEN reports>=2 THEN 1 ELSE hidden END WHERE id=?',(post_id,))
+ return response_cookie(RedirectResponse('/?tab=community',303),owner,fresh)
+
+@app.get('/health')
+async def health():return {'ok':True}
