@@ -68,7 +68,16 @@ async def home(request:Request,tab:str='home',prefecture:str='',category:str='')
   sql+=' ORDER BY p.id DESC LIMIT 100'
   posts=[dict(row) for row in c.execute(sql,args).fetchall()]
   comments={p['id']:[dict(x) for x in c.execute('SELECT * FROM comments WHERE post_id=%s AND hidden=0 ORDER BY id LIMIT 100',(p['id'],))] for p in posts}
- return templates.TemplateResponse(request,'index.html',{'tab':tab,'posts':posts,'comments':comments,'prefs':PREFS,'cats':CATS,'selected_pref':prefecture,'selected_cat':category,'error':request.query_params.get('error','')})
+ language = request.query_params.get('lang') or request.cookies.get('dj_language', 'en')
+ if language not in ('ja','en'): language='en'
+ names = 'Unspecified Hokkaido Aomori Iwate Miyagi Akita Yamagata Fukushima Ibaraki Tochigi Gunma Saitama Chiba Tokyo Kanagawa Niigata Toyama Ishikawa Fukui Yamanashi Nagano Gifu Shizuoka Aichi Mie Shiga Kyoto Osaka Hyogo Nara Wakayama Tottori Shimane Okayama Hiroshima Yamaguchi Tokushima Kagawa Ehime Kochi Fukuoka Saga Nagasaki Kumamoto Oita Miyazaki Kagoshima Okinawa'.split()
+ labels = dict(zip(PREFS+CATS,names+['Experience','Recommendation','Question','Food','Everyday life'])) if language=='en' else {}
+ response = templates.TemplateResponse(request,'index.html',{'english':language=='en','language':language,'labels':labels,'tab':tab,'posts':posts,'comments':comments,'prefs':PREFS,'cats':CATS,'selected_pref':prefecture,'selected_cat':category,'error':request.query_params.get('error','')})
+
+ if request.query_params.get('lang') in ('ja','en'):
+  response.set_cookie('dj_language', language, max_age=31536000, samesite='lax')
+ response.headers['Cache-Control']='private, no-store'
+ return response
 
 @app.post('/post')
 async def create_post(request:Request,author:str=Form(...),body:str=Form(...),prefecture:str=Form('指定なし'),category:str=Form('体験談'),website:str=Form('')):
