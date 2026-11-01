@@ -121,3 +121,43 @@ async def report(post_id:int,request:Request,comment_id:int=Form(0)):
 
 @app.get('/health')
 async def health():return {'ok':True}
+
+from typing import Literal
+from fastapi import Depends, Query
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+
+admin_login = HTTPBasic(realm="Discover Japan Admin")
+
+def require_admin(credentials: HTTPBasicCredentials = Depends(admin_login)):
+    password = os.environ.get("ADMIN_PASSWORD", "")
+    if not password or credentials.username != "admin" or not secrets.compare_digest(
+        credentials.password.encode(), password.encode()
+    ):
+        raise HTTPException(401, "管理者の認証が必要です", headers={
+            "WWW-Authenticate": 'Basic realm="Discover Japan Admin"',
+            "Cache-Control": "no-store",
+        })
+
+@app.get("/admin", dependencies=[Depends(require_admin)], include_in_schema=False)
+def moderation(request: Request, kind: Literal["posts", "comments"] = "posts",
+               page: int = Query(1, ge=1, le=1000000)):
+    with conn() as db:
+        records = db.execute(
+            f"SELECT id, author, body, reports, hidden FROM {kind} "
+            "ORDER BY id DESC LIMIT 31 OFFSET %s", ((page - 1) * 30,)
+        ).fetchall()
+    return templates.TemplateResponse(request, "admin.html", {
+        "records": records[:30], "has_next": len(records) > 30, "kind": kind, "page": page,
+    }, headers={"Cache-Control": "no-store", "X-Frame-Options": "DENY",
+                "Content-Security-Policy": "frame-ancestors 'none'; form-action 'self'"})
+
+@app.post("/admin/{kind}/{item_id}/remove", dependencies=[Depends(require_admin)], include_in_schema=False)
+def remove_from_feed(request: Request, kind: Literal["posts", "comments"], item_id: int,
+                     page: int = Form(1, ge=1, le=1000000)):
+    if request.headers.get("origin") != str(request.base_url).rstrip("/"):
+        raise HTTPException(403, "操作元を確認できません")
+    with conn() as db:
+        result = db.execute(f"UPDATE {kind} SET hidden=1 WHERE id=%s", (item_id,))
+        if not result.rowcount:
+            raise HTTPException(404, "対象が見つかりません")
+    return RedirectResponse(f"/admin?kind={kind}&page={page}", 303)

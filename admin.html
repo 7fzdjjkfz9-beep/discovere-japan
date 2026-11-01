@@ -1,0 +1,10 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>投稿管理 | Discover Japan</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><main class="wrap section"><p>DISCOVER JAPAN · 運営者専用</p><h1>投稿管理</h1>
+<p><a href="/admin?kind=posts">投稿一覧</a>　<a href="/admin?kind=comments">コメント一覧</a></p>
+<h2>{{ '投稿' if kind == 'posts' else 'コメント' }}一覧</h2>
+{% for r in records %}<article class="form-card"><strong>{{ r.author }}</strong> · #{{ r.id }} · 通報 {{ r.reports }} 件 · {{ '非公開' if r.hidden else '公開' }}
+<p style="white-space:pre-wrap;overflow-wrap:anywhere">{{ r.body }}</p>
+{% if not r.hidden %}<details><summary>公開一覧から削除</summary><p>この{{ '投稿とその返信' if kind == 'posts' else 'コメント' }}を公開一覧から取り下げます。</p><form method="post" action="/admin/{{ kind }}/{{ r.id }}/remove"><input type="hidden" name="page" value="{{ page }}"><button>確認して削除</button></form></details>{% endif %}</article>
+{% else %}<p>このページに表示する項目はありません。</p>{% endfor %}
+<p>{% if page > 1 %}<a href="?kind={{ kind }}&page={{ page-1 }}">前へ</a>　{% endif %}{{ page }} ページ {% if has_next %}　<a href="?kind={{ kind }}&page={{ page+1 }}">次へ</a>{% endif %}</p>
+</main></body></html>
